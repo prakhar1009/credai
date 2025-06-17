@@ -45,6 +45,9 @@ CredAI is a powerful news analysis tool that leverages AI agents to provide in-d
 To start the application, run the following command in your terminal:
 
 ```bash
+python news.py
+'''
+'''
 streamlit run app.py
 ```
 
