@@ -19,7 +19,7 @@ CredAI is a powerful news analysis tool that leverages AI agents to provide in-d
 1.  **Clone the repository:**
 
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/prakhar1009/credai.git
     cd credai
     ```
 
