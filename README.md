@@ -46,8 +46,7 @@ To start the application, run the following command in your terminal:
 
 ```bash
 python news.py
-'''
-'''
+ or
 streamlit run app.py
 ```
 
