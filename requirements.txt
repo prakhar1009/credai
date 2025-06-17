@@ -1,0 +1,7 @@
+streamlit
+python-dotenv
+crewai
+crewai-tools
+requests
+beautifulsoup4
+google-generativeai
