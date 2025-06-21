@@ -87,7 +87,7 @@ CredAI uses a crew of four specialized AI agents, each with specific expertise:
 1. **Clone the repository:**
 
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/prakhar1009/credai.git
     cd credai
     ```
 
@@ -119,6 +119,8 @@ CredAI uses a crew of four specialized AI agents, each with specific expertise:
 To start the Streamlit web application:
 
 ```bash
+python news.py
+ or
 streamlit run app.py
 ```
 
