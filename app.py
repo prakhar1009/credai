@@ -10,13 +10,44 @@ from crewai_tools import SerperDevTool
 import re
 from bs4 import BeautifulSoup
 import warnings
+import sys
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
+# Suppress litellm verbose logging
+os.environ["LITELLM_LOG"] = "ERROR"
+import litellm
+litellm.set_verbose = False
+
 # Load environment variables
 load_dotenv()
+
+# Rate limiting configuration
+class RateLimiter:
+    def __init__(self, requests_per_minute=8):
+        self.requests_per_minute = requests_per_minute
+        self.min_interval = 60.0 / requests_per_minute
+        self.last_request_time = 0
+        
+    def wait_if_needed(self):
+        current_time = time.time()
+        elapsed = current_time - self.last_request_time
+        
+        if elapsed < self.min_interval:
+            wait_time = self.min_interval - elapsed
+            st.info(f"⏳ Rate limiting: Waiting {wait_time:.1f} seconds...")
+            time.sleep(wait_time)
+        
+        self.last_request_time = time.time()
+
+# Global rate limiter - 8 requests per minute (safe for free tier)
+rate_limiter = RateLimiter(requests_per_minute=8)
+
+# Configure API keys
+os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY")
+os.environ["SERPER_API_KEY"] = os.getenv("SERPER_API_KEY")
 
 # Configure Streamlit page
 st.set_page_config(
@@ -33,7 +64,7 @@ st.markdown("""
         text-align: center;
         padding: 2rem 0;
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: white;
+        color: blue;
         border-radius: 10px;
         margin-bottom: 2rem;
     }
@@ -45,7 +76,7 @@ st.markdown("""
         margin: 1rem 0;
     }
     .metric-card {
-        background: white;
+        background: blue;
         padding: 1rem;
         border-radius: 8px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
@@ -183,65 +214,93 @@ def format_analysis_output(crew_result) -> dict:
 
 @st.cache_resource
 def initialize_agents():
-    """Initialize and cache the AI agents"""
+    """Initialize and cache the AI agents and LLMs"""
     # Configure API keys
     if not os.getenv("GOOGLE_API_KEY"):
         st.error("❌ GOOGLE_API_KEY not found! Please add it to your .env file.")
-        return None
+        return None, None
     
-    # Initialize LLM
-    llm = LLM(
-        model="gemini/gemini-1.5-flash",
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        temperature=0.5,
-        max_retries=3,
-        timeout=60,
-        max_rpm=8
+    # Initialize our agents with the LLM
+    llm = Gemini(
+        model="gemini-1.5-flash", 
+        request_timeout=120,
+        callbacks=[lambda: rate_limiter.wait_if_needed()]
+    )
+    
+    # Manager LLM for better coordination
+    manager_llm = Gemini(
+        model="gemini-2.0-flash-exp",
+        temperature=0.3,  # Lower temperature for more consistent management
+        request_timeout=120,
+        callbacks=[lambda: rate_limiter.wait_if_needed()]
     )
     
     # Initialize search tool
     search_tool = SerperDevTool() if os.getenv("SERPER_API_KEY") else None
     
-    # Define Agents
+    # Create agents
+    # 1. News Analyst - Focuses on extracting key information
     news_analyst = Agent(
         role="Senior News Analyst",
         goal="Extract and summarize the most important facts from news articles with precision and clarity",
-        backstory="""You are a veteran news analyst with 20 years of experience at major publications. 
-        You excel at quickly identifying the key facts in any article and presenting them clearly. 
-        You focus on concrete information: who, what, when, where, why, and how.""",
+        backstory="""You are a veteran news analyst with 20 years of experience at top news outlets. 
+        Your specialty is identifying key facts and important developments in complex news stories.
+        You have a talent for finding the signal in the noise and can quickly determine what matters most in any article.
+        You pride yourself on extracting concrete information and presenting it in a clear, concise manner.
+        You focus on answering the key journalistic questions: Who, What, When, Where, Why, and How.""",
         llm=llm,
-        verbose=False,
+        verbose=True,
         memory=False,
         allow_delegation=False,
         max_iter=1,
         max_rpm=8
     )
     
+    # 2. Credibility Checker - Evaluates source reliability
     cred_checker = Agent(
-        role="Media Credibility Expert",
-        goal="Evaluate the reliability and trustworthiness of news articles based on journalistic standards",
-        backstory="""You are an expert in media literacy and journalism ethics with a background in fact-checking. 
-        You evaluate articles based on source quality, attribution, evidence, and journalistic standards.""",
+        role="Credibility Assessment Specialist",
+        goal="Evaluate the credibility and reliability of news articles based on journalistic standards",
+        backstory="""You are a media literacy expert and former fact-checker who specializes in evaluating news credibility.
+        You have worked for media watchdog organizations and journalism ethics boards for over 15 years.
+        You know the hallmarks of reliable reporting: named sources, specific data, balanced perspectives,
+        and transparent attribution. You can spot red flags like vague attributions, emotional language,
+        and missing context. Your assessments are methodical and evidence-based, never partisan or ideological.
+        You've developed a comprehensive framework for credibility scoring that's used by news organizations worldwide.""",
         llm=llm,
-        verbose=False,
+        verbose=True,
         memory=False,
-        tools=[search_tool] if search_tool else [],
         allow_delegation=False,
         max_iter=1,
         max_rpm=8
     )
     
+    # 3. Source Hunter - Verifies article claims
     source_hunter = Agent(
-        role="Fact Verification Specialist",
-        goal="Verify key claims in articles using reliable sources and evidence",
-        backstory="""You are a meticulous fact-checker who specializes in verifying claims using multiple sources. 
-        You have extensive experience in investigative research and cross-referencing information.""",
+        role="Investigative Fact Checker",
+        goal="Verify factual claims in news articles through independent research and provide evidence",
+        backstory="""You are a seasoned investigative journalist who specializes in fact-checking and verification.
+        You have won prestigious awards for exposing misinformation and your meticulous research skills.
+        You know how to find primary sources, cross-reference information, and determine the veracity of claims.
+        You believe in evidence-based reporting and have a vast knowledge of reliable information sources.
+        You never make assertions without backing them up with concrete evidence and specific sources.
+        You understand that proper attribution is essential, and you always provide full URLs to your sources.
+        When you cannot verify something, you clearly state that rather than making assumptions.
+        
+        When verifying claims:
+        1. Extract specific, verifiable factual claims from the article
+        2. Use search tools to find supporting or conflicting evidence from reputable sources
+        3. ALWAYS include the full URLs to verification sources for each claim
+        4. Prioritize primary sources, official statistics, and reputable news outlets
+        5. For each claim, provide a confidence level along with your verification
+        6. If conflicting information exists, present both sides with their respective sources
+        7. Never make verification statements without linking to specific sources
+        8. For claims that touch on scientific or technical matters, seek peer-reviewed research""",
         llm=llm,
         tools=[search_tool] if search_tool else [],
         verbose=False,
         memory=False,
-        allow_delegation=False,
-        max_iter=3,
+        allow_delegation=True,  # Allow delegation to other agents for complex cases
+        max_iter=5,  # Increased iterations for more thorough search
         max_rpm=8
     )
     
@@ -249,7 +308,15 @@ def initialize_agents():
         role="Media Bias Analyst",
         goal="Identify and analyze potential bias in news reporting through language and framing analysis",
         backstory="""You are a linguistics expert specializing in media analysis and bias detection. 
-        You have studied how language choices, framing, and narrative structure can influence perception.""",
+        You have studied how language choices, framing, and narrative structure can influence perception. 
+        You provide objective analysis of potential bias while recognizing that all reporting has some perspective.
+        
+        When analyzing for bias:
+        1. Examine specific word choices and their connotations
+        2. Look for loaded language or emotional appeals
+        3. Check if all relevant perspectives are included
+        4. Identify what might be missing from the story
+        5. Provide specific examples from the text""",
         llm=llm,
         verbose=False,
         memory=False,
@@ -258,45 +325,158 @@ def initialize_agents():
         max_rpm=8
     )
     
-    return news_analyst, cred_checker, source_hunter, bias_detector
+    agents = {
+        'news_analyst': news_analyst,
+        'cred_checker': cred_checker,
+        'source_hunter': source_hunter,
+        'bias_detector': bias_detector
+    }
+    
+    return agents, manager_llm
 
 def create_tasks(agents):
     """Create analysis tasks"""
-    news_analyst, cred_checker, source_hunter, bias_detector = agents
+    if not agents:
+        st.error("❌ Cannot create tasks: agents not initialized")
+        return []
+        
+    news_analyst = agents.get('news_analyst')
+    cred_checker = agents.get('cred_checker')
+    source_hunter = agents.get('source_hunter')
+    bias_detector = agents.get('bias_detector')
+    
+    if not all([news_analyst, cred_checker, source_hunter, bias_detector]):
+        st.warning("⚠️ Some agents could not be initialized properly")
+        return []
     
     analysis_task = Task(
         description="""Analyze the provided article content and create 5 key bullet points summarizing the main facts.
+        
         Article content: {article}
         
-        Format your response as clear bullet points focusing on concrete information.""",
+        Instructions:
+        1. Read the entire article carefully
+        2. Identify the 5 most important facts or developments
+        3. Write each fact as a clear, concise bullet point
+        4. Focus on concrete information (numbers, names, places, events)
+        5. Each bullet should be 1-2 sentences maximum
+        
+        Format your response as:
+        • [First key fact]
+        • [Second key fact]
+        • [Third key fact]
+        • [Fourth key fact]
+        • [Fifth key fact]
+        
+        Example output:
+        • Canadian tourism to US border states has dropped by 50% since spring according to Kingdom Trails Association
+        • Jay Peak Resort reports cancellations started after Trump's "51st state" comments about Canada
+        • Vermont businesses are offering "at-par" pricing to attract Canadian customers back
+        • Maine Governor installed bilingual "Bienvenue Canadiens" signs along interstates
+        • 60% of Jay Peak's summer traffic typically comes from Canadian visitors""",
         expected_output="5 clear bullet points summarizing the article's main facts",
         agent=news_analyst
     )
     
     credibility_task = Task(
-        description="""Assess the credibility of the article provided.
+        description="""Assess the credibility of the article provided below.
+        
         Article content: {article}
         
-        Provide a credibility score (0-100) with explanation.""",
-        expected_output="Credibility score (0-100) with explanation",
+        Instructions:
+        1. Evaluate the sources mentioned (are they named and reputable?)
+        2. Check for specific data, quotes, and attribution
+        3. Look for balanced perspectives or potential bias
+        4. Assess factual accuracy based on your knowledge
+        5. Rate credibility from 0-100 (0=not credible, 100=highly credible)
+        
+        Provide:
+        - Credibility Score: [0-100]
+        - Explanation: [2-3 sentences explaining your rating]""",
+        expected_output="Credibility score (0-100) with 2-3 sentence explanation",
         agent=cred_checker
     )
     
     source_validation_task = Task(
-        description="""Identify and verify the top 3 most important factual claims in the article.
+        description="""Identify and verify the top 3 most important factual claims in the article with source links.
+        
         Article content: {article}
         
-        Mark each as: Verified, Unverified, or Disputed with explanations.""",
-        expected_output="List of 3 claims with verification status and explanations",
+        Instructions:
+        1. Identify the 3 most significant factual claims (statistics, quotes, events) from the article
+        2. Use web search to verify each claim using multiple credible sources
+        3. For EACH claim, you MUST provide: 
+           - Verification status: Verified (strong evidence), Partially Verified (some evidence), Disputed (conflicting information), or Unverified (insufficient evidence)
+           - Confidence level (High/Medium/Low)
+           - AT LEAST 2 specific verification source URLs for each claim
+           - URLs must be complete and functional (e.g., https://www.example.com/article-path)
+        4. If sources contradict each other, explain the discrepancy and cite both perspectives
+        
+        Format each claim verification as:
+        
+        ### Claim 1: [Exact claim from article]
+        **Status:** [Verification status] (Confidence: [Level])
+        **Analysis:** [2-3 sentence explanation of verification findings]
+        **Sources:**
+        - [Source name 1]: [Full URL 1]
+        - [Source name 2]: [Full URL 2]
+        - [Additional sources if relevant]: [Full URL]
+        
+        ### Claim 2: [Exact claim from article]
+        **Status:** [Verification status] (Confidence: [Level])
+        **Analysis:** [2-3 sentence explanation of verification findings]
+        **Sources:**
+        - [Source name 1]: [Full URL 1]
+        - [Source name 2]: [Full URL 2]
+        
+        ### Claim 3: [Exact claim from article]
+        **Status:** [Verification status] (Confidence: [Level])
+        **Analysis:** [2-3 sentence explanation of verification findings]
+        **Sources:**
+        - [Source name 1]: [Full URL 1]
+        - [Source name 2]: [Full URL 2]
+        
+        Remember: NEVER assert verification without providing specific source URLs. If you cannot find verification sources, state this explicitly.""",
+        expected_output="Detailed verification of 3 key claims with source links",
         agent=source_hunter
     )
     
     bias_detection_task = Task(
-        description="""Analyze the article for potential bias in language, framing, or perspective.
+        description="""Conduct a comprehensive analysis of potential bias in the article's language, framing, and perspective.
+        
         Article content: {article}
         
-        Provide a bias score (0-100) with examples if biased.""",
-        expected_output="Bias score (0-100) with examples if biased",
+        Instructions:
+        1. Examine specific word choices, tone, and framing techniques
+        2. Evaluate representation of multiple perspectives and viewpoints
+        3. Identify missing context, one-sided reporting, or narrative techniques
+        4. Analyze source selection and how quotes are presented
+        5. Rate overall bias from 0-100 (0=completely neutral, 100=extremely biased)
+        
+        Provide your analysis in this format:
+        
+        ## Bias Assessment
+        **Bias Score:** [0-100]
+        
+        **Bias Direction:** [Left-leaning/Right-leaning/Corporate/Anti-establishment/Other specific bias type, or "Balanced" if neutral]
+        
+        **Language Analysis:**
+        - Evaluate emotional vs. neutral language
+        - Note any loaded terms, euphemisms, or framing devices
+        - Identify if language appeals to emotion over facts
+        
+        **Perspective Analysis:**
+        - Are multiple perspectives presented fairly?
+        - Which viewpoints receive more coverage or favorable treatment?
+        - Are any critical perspectives missing?
+        
+        **Specific Examples:**
+        1. [First example - quote specific text and explain bias]
+        2. [Second example - quote specific text and explain bias]
+        3. [Third example - if applicable]
+        
+        If the article scores ≤ 20 on the bias scale, you may state "The article appears largely neutral in tone and presentation" and provide brief explanation of what makes it balanced.""",
+        expected_output="Detailed bias analysis with specific examples and explanation of bias type",
         agent=bias_detector
     )
     
@@ -304,26 +484,32 @@ def create_tasks(agents):
 
 def run_analysis(content: str):
     """Run the news analysis"""
-    agents = initialize_agents()
+    agents, manager_llm = initialize_agents()
     if not agents:
         return None
     
     tasks = create_tasks(agents)
     
-    # Create crew
+    # Create crew with manager LLM for better coordination
     crew = Crew(
         agents=list(agents),
         tasks=tasks,
         process=Process.sequential,
         verbose=False,
         memory=False,
-        max_rpm=5,
-        planning=False
+        max_rpm=8,  # Match our rate limiter setting
+        manager_llm=manager_llm,  # Use specialized manager for task coordination
+        planning=True  # Enable planning for better agent collaboration
     )
     
-    # Run analysis
-    result = crew.kickoff(inputs={"article": content})
-    return format_analysis_output(result)
+    # Run analysis with error handling
+    try:
+        result = crew.kickoff(inputs={"article": content})
+        return format_analysis_output(result)
+    except Exception as e:
+        st.error(f"🛑 Error during analysis: {str(e)}")
+        st.info("Try with a different article or check your API keys.")
+        return None
 
 # Main Streamlit App
 def main():
